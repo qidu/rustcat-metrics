@@ -1,0 +1,37 @@
+[package]
+name = "rustcat-metrics"
+version = "0.1.0"
+edition = "2024"
+description = "Read system resources — CPU, memory, disk, network — and any data of your own, as metrics"
+license = "MIT"
+repository = "https://github.com/qidu/rustcat-metrics"
+readme = "README.md"
+
+# This crate is only ever a library: it is a dependency of the tray app, not an
+# application itself. Stated explicitly so the intent survives an edit to the
+# package section.
+[lib]
+name = "rustcat_metrics"
+crate-type = ["lib"]
+
+[dependencies]
+# Cross-platform system info. sysinfo's own defaults are switched off so each
+# metric feature below pulls in exactly the platform code it needs.
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
+# Serialization for the metric and snapshot types.
+serde = { version = "1.0", features = ["derive"] }
+
+[features]
+default = ["cpu", "memory", "disk", "network"]
+# Each feature gates its module in `lib.rs` and the matching sysinfo backend.
+cpu = ["sysinfo/component"]  # component = thermal sensors for CPU temperature
+memory = []
+disk = ["sysinfo/disk"]
+network = ["sysinfo/network"]
+
+[dev-dependencies]
+pretty_assertions = "1.0"
+# Used by the tests and examples that show a snapshot as JSON, not by the
+# library itself, so it stays out of the dependency graph for consumers.
+serde_json = "1.0"
