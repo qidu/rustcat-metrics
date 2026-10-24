@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The hook for the web UI's "Create a new release" button — it fires on Publish,
+  # and covers `gh release create` and the API too. A tag-push trigger would miss a
+  # release aimed at a tag that already existed, since nothing is pushed then.
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # Each metric reads a different part of sysinfo's platform code, so passing on
+  # one OS says little about the other two.
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test --all-features
+        run: cargo test --all-features
+
+  features:
+    name: feature combinations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The generic layer is always compiled, so the crate has to build and its
+      # tests pass with every resource feature switched off.
+      - name: cargo test --no-default-features
+        run: cargo test --no-default-features
+
+      # Then one resource at a time, so a feature that only compiles alongside
+      # another is caught here instead of by whoever disables the defaults.
+      - name: cargo test --features <one>
+        run: |
+          set -euo pipefail
+          for feature in cpu memory disk network; do
+            echo "::group::--features $feature"
+            cargo test --no-default-features --features "$feature"
+            echo "::endgroup::"
+          done
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo doc
+        run: cargo doc --no-deps --all-features
+
+  # This crate is a library, so a release has no installer to attach — crates.io is
+  # where it actually ships. Publishing waits on the whole suite above because
+  # crates.io versions are permanent: a broken 0.1.0 can only be yanked, not
+  # replaced, and the faulty version stays downloadable forever.
+  publish:
+    name: publish to crates.io
+    if: github.event_name == 'release'
+    needs: [lint, test, features, docs]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `secrets` is not one of the contexts an `if:` can read, so the token is
+      # carried through a step output instead. With no secret configured the job
+      # announces that it published nothing and reports success, so an existing
+      # release workflow is never broken by this job being added.
+      - name: Look for a crates.io token
+        id: token
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -n "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Not published::CARGO_REGISTRY_TOKEN is unset, so nothing was sent to crates.io."
+          fi
+
+      # cargo publishes whatever version Cargo.toml holds, not the one the tag
+      # names, so a tag that disagrees would ship the wrong version under a
+      # correct-looking release page. Cheaper to stop here than to explain it later.
+      - name: Check the release tag against Cargo.toml
+        if: steps.token.outputs.present == 'true'
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          crate_version=$(cargo metadata --format-version 1 --no-deps \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          if [ "${TAG#v}" != "$crate_version" ]; then
+            echo "::error::release tag $TAG does not match the Cargo.toml version $crate_version"
+            exit 1
+          fi
+
+      - name: cargo publish
+        if: steps.token.outputs.present == 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish
